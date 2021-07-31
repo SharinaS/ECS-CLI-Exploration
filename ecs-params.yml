@@ -1,0 +1,17 @@
+version: 1
+task_definition:
+  task_execution_role: arn:aws:iam::842337631775:role/stubbs-sandbox-ExecutionRole
+  ecs_network_mode: awsvpc
+  task_size:
+    mem_limit: 0.5GB
+    cpu_limit: 256
+run_params:
+  network_configuration:
+    awsvpc_configuration:
+      subnets:
+        - "subnet-0744aa1db922d85d4"
+        - "subnet-0816ec5432a9c4b0c"
+        - "subnet-0a2e748af742cefc3"
+      security_groups:
+        - "sg-0b4277366af4b78f7"
+      assign_public_ip: DISABLED

@@ -1,0 +1,14 @@
+version: '3'
+services:
+  sharina-ecs-cli:
+    environment:
+      - SHARINA_URL=http://sharina-ecs-cli.service:5000/hello
+    image: stubbs/sharina-ecs-cli
+    ports:
+      - "5000:5000"
+    logging:
+      driver: awslogs
+      options:
+        awslogs-group: sharina-cli-flask
+        awslogs-region: us-west-2
+        awslogs-stream-prefix: sharina-cli-flask

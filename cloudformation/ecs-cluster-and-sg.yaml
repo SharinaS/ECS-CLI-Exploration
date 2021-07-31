@@ -1,0 +1,192 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Deploys an AWS Fargate cluster that can span public and private subnets, and an external,
+  public facing load balancer, for forwarding public traffic to containers
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Description: >
+      "A friendly environment name that will be used for namespacing all cluster resources.
+      Example: staging, qa, or production"
+    Default: stubbs-sandbox
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC ID of the VPC you want the Container Security Group to be associated with.
+    Default: vpc-0dd8b784a0fd18dc4
+
+  PublicSubnetOne:
+    Type: AWS::EC2::Subnet::Id
+    Default: subnet-07b893ff971c98940
+    Description: A public Subnet Id within the VPC the ECS cluster is in.
+
+  PublicSubnetTwo:
+    Type: AWS::EC2::Subnet::Id
+    Default: subnet-01b3337d99e90edc6
+    Description: A public Subnet Id within the VPC the ECS cluster is in.
+
+  PublicSubnetThree:
+    Type: AWS::EC2::Subnet::Id
+    Default: subnet-0001647f0daa26ddd
+    Description: A public Subnet Id within the VPC the ECS cluster is in.
+
+  ContainerPort:
+    Type: Number
+    Default: 5000
+    Description: >
+      The port the container will talk on. For Flask, this is port 5000.
+      This matches the port that is exposed in the Dockerfile.
+
+Resources:
+  # ------ Cluster ------
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+
+  #------ Security Groups and Ingress Rules ------
+  # A security group for the containers we will run in Fargate.
+  # Rules are added to this security group based on what ingress you
+  # add for the cluster.
+  ContainerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Access to the Fargate containers from the ALB
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: "-1"
+          SourceSecurityGroupId: !GetAtt PublicLoadBalancerSG.GroupId
+
+  EcsSecurityGroupIngressFromContainerPort:
+  # Allows containers to talk on the ContainerPort.
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow traffic on container port
+      GroupId: !Ref ContainerSecurityGroup
+      IpProtocol: tcp
+      FromPort: !Ref ContainerPort
+      ToPort: !Ref ContainerPort
+      SourceSecurityGroupId: !Ref ContainerSecurityGroup
+
+  # Public load balancer, hosted in public subnets that is accessible
+  # to the public, and is intended to route traffic to one or more public
+  # facing services. This is used for accepting traffic from the public
+  # internet and directing it to public facing microservices
+  PublicLoadBalancerSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Access to the public facing load balancer
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+          # Allow access to ALB from anywhere on the internet
+          - CidrIp: 0.0.0.0/0
+            IpProtocol: "-1"
+
+  #------ ALB ------
+  PublicLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Scheme: internet-facing
+      LoadBalancerAttributes:
+      - Key: idle_timeout.timeout_seconds
+        Value: '30'
+      Subnets:
+        # The load balancer is placed into the public subnets, so that traffic
+        # from the internet can reach the load balancer directly via the internet gateway
+        - !Ref PublicSubnetOne
+        - !Ref PublicSubnetTwo
+        - !Ref PublicSubnetThree
+      SecurityGroups: [!Ref PublicLoadBalancerSG]
+
+  TargetGroupPublic:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      TargetType: ip
+      HealthCheckIntervalSeconds: 10
+      HealthCheckPath: "/"
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      Matcher:
+        HttpCode: '200-299'
+      Port: 5000
+      Protocol: HTTP
+      UnhealthyThresholdCount: 10
+      VpcId:
+        !Ref VpcId
+      TargetGroupAttributes:
+      - Key: deregistration_delay.timeout_seconds
+        Value: '5'
+      - Key: slow_start.duration_seconds
+        Value: '60'
+
+  PublicLoadBalancerListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - TargetGroupArn: !Ref TargetGroupPublic
+          Type: 'forward'
+      LoadBalancerArn: !Ref 'PublicLoadBalancer'
+      Port: 80
+      Protocol: HTTP
+
+  #------ IAM -------
+  ECSTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${EnvironmentName}-ExecutionRole
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      Policies:
+        - PolicyName: !Sub ${EnvironmentName}-ECSTaskExecutionRolePolicy
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "ecr:GetAuthorizationToken"
+                  - "ecr:BatchCheckLayerAvailability"
+                  - "ecr:GetDownloadUrlForLayer" #TODO: Needed?
+                  - "ecr:BatchGetImage"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Resource: "*"
+
+  #TODO: Log Group
+
+# These are the values output by the CloudFormation template. Be careful
+# about changing any of them, because of them are exported with specific
+# names so that the other task related CF templates can use them.
+Outputs:
+  ClusterName:
+    Description: The name of the ECS cluster
+    Value: !Ref 'ECSCluster'
+    Export:
+      Name: !Sub ${EnvironmentName}:ClusterName
+
+  ContainerSecurityGroup:
+    Description: A security group used to allow Fargate containers to receive traffic
+    Value: !Ref 'ContainerSecurityGroup'
+    Export:
+      Name: !Sub ${EnvironmentName}:ContainerSecurityGroup
+
+  PublicListener:
+    Description: The ARN of the public load balancer's Listener
+    Value: !Ref PublicLoadBalancerListener
+    Export:
+      Name: !Sub ${EnvironmentName}:PublicListener
+
+  ExternalUrl:
+    Description: The url of the external load balancer
+    Value: !Sub http://${PublicLoadBalancer.DNSName}
+    Export:
+      Name: !Sub ${EnvironmentName}:ExternalUrl
+
+  ECSTaskExecutionRole:
+    Description: Outputs the ARN of the role
+    Value: !GetAtt ECSTaskExecutionRole.Arn
+    Export:
+      Name: !Sub ${EnvironmentName}:ECSTaskExecutionRole
